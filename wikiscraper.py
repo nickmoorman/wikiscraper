@@ -171,3 +171,4 @@ extractedData = handleResponse(response, url)
 
 # TODO: This is also terrible
 yaml.safe_dump(extractedData, file(conf["outputFilename"], "w"))
+yaml.dump(extractedData, file(conf["outputFilename"].replace(".yml", "-loadable.yml"), "w"))
