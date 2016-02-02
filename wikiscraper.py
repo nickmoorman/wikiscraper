@@ -78,7 +78,8 @@ def cleanExampleResponse(data):
         phrases = [
             "Please note: This response has been truncated for easier viewing.",
             "This response has been truncated to make it easier to see the full structure.",
-            "// Note this is an associative array"
+            "// Note this is an associative array",
+            "Note: Response has been truncated."
         ]
         for phrase in phrases:
             res = res.replace(phrase, "")
