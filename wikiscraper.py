@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
+import hashlib
 import json
 import mwparserfromhell
 import pprint
+import re
 import sys
 import urllib2
 import yaml
@@ -17,6 +19,10 @@ def stripSyntaxHighlighter(text):
 
     return text
 
+def hashPageText(data):
+    data["textHash"] = hashlib.sha256(data["text"].encode("utf-8")).hexdigest()
+    del data["text"]
+
 def combineNamesAndDescriptions(d, varType):
     nameField = varType + "VariableNames"
     descField = varType + "VariableDescriptions"
@@ -27,7 +33,16 @@ def combineNamesAndDescriptions(d, varType):
         elif len(d[nameField]) != len(d[descField]):
             print "Unmatched pairs!"
         else:
-            pairs = dict(zip(d[nameField], d[descField]))
+            pairs = {}
+            pattern = re.compile("\[\[([A-Za-z]*)\|([A-Za-z]*)\]\]")
+            for i in xrange(0, len(d[nameField])):
+                key = d[nameField][i]
+                val = d[descField][i]
+                m = pattern.match(key)
+                if m:
+                    pairs[m.group(2)] = val + " (See %s Wikia page for more details.)" % m.group(1)
+                else:
+                    pairs[key] = val
             d[finalField] = pairs
             del d[nameField]
             del d[descField]
@@ -35,6 +50,45 @@ def combineNamesAndDescriptions(d, varType):
         print "Only names found!"
     elif descField in d:
         print "Only descriptions found!"
+
+def cleanExampleRequest(data):
+    if "httpMethod" in data and "exampleRequest" in data and data["httpMethod"] == "post":
+        try:
+            req = json.loads(data["exampleRequest"].split("\n", 1)[1])
+            data["exampleRequest"] = json.dumps(req)
+        except ValueError as ve:
+            print "Error decoding JSON for exampleRequest in " + data["name"]
+
+# GetPublicXurVendor has blocks for "When Xur is/isn't available."
+def cleanExampleResponse(data):
+    if data["name"] == "GetPublicXurVendor":
+        res = data["exampleResponse"].replace("When Xur isn't available.", "")
+        responses = res.split("When Xur is available.")
+        try:
+            data["exampleResponses"] = [
+                json.dumps(json.loads(responses[1])),
+                json.dumps(json.loads(responses[0]))
+            ]
+            del data["exampleResponse"]
+        except ValueError as ve:
+            print "Error decoding JSON for exampleResponses in GetPublicXurVendor"
+            print responses
+    elif "exampleResponse" in data:
+        res = data["exampleResponse"]
+        phrases = [
+            "Please note: This response has been truncated for easier viewing.",
+            "This response has been truncated to make it easier to see the full structure.",
+            "// Note this is an associative array"
+        ]
+        for phrase in phrases:
+            res = res.replace(phrase, "")
+        try:
+            res = json.loads(res)
+            data["exampleResponses"] = [json.dumps(res)]
+            del data["exampleResponse"]
+        except ValueError as ve:
+            print "Error decoding JSON for exampleResponse in " + data["name"]
+            print res
 
 # TODO: This is VERY specific
 def performExtractions(pageData):
@@ -48,10 +102,14 @@ def performExtractions(pageData):
     for ext in conf["extractions"]:
         sel = ext["selector"]
         if sel["type"] == "pageData":
-            data[rget(ext, ["target", "name"])] = pageData[sel["value"]].strip()
+            data[rget(ext, ["target", "name"])] = pageData[sel["value"]]
+        elif sel["type"] == "pageText":
+            data[rget(ext, ["target", "name"])] = rget(pageData, ["revisions", 0, "*"])
         elif sel["type"] == "templateVariable":
             if template.has(sel["value"]):
-                data[ext["target"]["name"]] = template.get(sel["value"]).value.strip()
+                var = template.get(sel["value"]).value.strip()
+                if var != "":
+                    data[ext["target"]["name"]] = var
         elif sel["type"] == "collectedTemplateVariables":
             for i in xrange(sel["rangeStart"], sel["rangeEnd"]+1):
                 varName = "{0}{1}".format(sel["value"], i)
@@ -62,9 +120,12 @@ def performExtractions(pageData):
                     data[targetName].append(template.get(varName).value.strip())
 
     # TODO: Make this configurable too
+    hashPageText(data)
     combineNamesAndDescriptions(data, "path")
     combineNamesAndDescriptions(data, "queryString")
     combineNamesAndDescriptions(data, "jsonBody")
+    cleanExampleRequest(data)
+    cleanExampleResponse(data)
 
     return data
 
