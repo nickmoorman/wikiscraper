@@ -130,6 +130,24 @@ def performExtractions(pageData):
 
     return data
 
+def saveResponse(response, baseUrl, calledUrl, responseIndex=0):
+    response["metadata"] = {
+        "source": calledUrl
+    }
+    nextResponse = None
+    if "query-continue" in response:
+        continueParam = response["query-continue"].values()[0]
+        continueQueryString = "%s=%s" % (continueParam.keys()[0], continueParam.values()[0])
+        nextUrl = baseUrl + "&%s" % continueQueryString
+        del response["query-continue"]
+        response["metadata"]["next"] = nextUrl
+        nextResponse = json.loads(urllib2.urlopen(nextUrl).read())
+    outputFilename = sys.argv[1].replace(".yml", "-raw-%03d.json" % responseIndex)
+    json.dump(response, file(outputFilename, "w"))
+    if nextResponse:
+        saveResponse(nextResponse, baseUrl, nextUrl, responseIndex+1)
+
+
 # TODO: Fucking awful
 def handleResponse(response, baseUrl, extractedData=[]):
     for pageId, pageData in rget(response, ["query", "pages"]).iteritems():
@@ -146,12 +164,13 @@ def handleResponse(response, baseUrl, extractedData=[]):
 
 # TODO: Check out argparse
 # Make sure a config file's name was passed in, then load it
-if len(sys.argv) == 2:
+if len(sys.argv) > 1:
     # TODO: Verify file exists
     conf = yaml.load(file(sys.argv[1], "r"))
 else:
     # TODO: Print usage
     print "No file specified!"
+    exit()
 
 # Get data
 # TODO: Support looping and paging
@@ -167,9 +186,13 @@ elif selType == "category":
 # TODO: http://docs.python-requests.org/en/latest/
 response = json.loads(urllib2.urlopen(url).read())
 
-# Extract data
-extractedData = handleResponse(response, url)
+if len(sys.argv) == 3 and sys.argv[2] == "--save-only":
+    # Just save the raw data for future processing
+    saveResponse(response, url, url)
+else:
+    # Extract data
+    extractedData = handleResponse(response, url)
 
-# TODO: This is also terrible
-yaml.safe_dump(extractedData, file(conf["outputFilename"], "w"))
-yaml.dump(extractedData, file(conf["outputFilename"].replace(".yml", "-loadable.yml"), "w"))
+    # TODO: This is also terrible
+    yaml.safe_dump(extractedData, file(conf["outputFilename"], "w"))
+    yaml.dump(extractedData, file(conf["outputFilename"].replace(".yml", "-loadable.yml"), "w"))
