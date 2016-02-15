@@ -1,17 +1,66 @@
 #!/usr/bin/env python
 
+import argparse
+import copy
 import hashlib
 import json
 import mwparserfromhell
+import os.path
 import pprint
 import re
-import sys
-import urllib2
+import requests
 import yaml
 
 class WikiScraper:
     """Used to scrape structured data from a set of MediaWiki pages"""
 
+    def __init__(self, configFileName):
+        """Set up the scraper"""
+        if not configFileName:
+            raise ValueError("Must pass in the name of a config file")
+        self.configFileName = configFileName
+        if os.path.isfile(configFileName):
+            with open(configFileName, "r") as configFile:
+                self.conf = yaml.load(configFile)
+        else:
+            raise IOError("Config file %s does not exist" % configFileName)
+
+        # Set up base URL and params for easy access
+        self.baseUrl = self.conf["baseUrl"]
+        self.baseParams = {
+            "action": "query",
+            "format": "json",
+            "prop": "revisions",
+            "rvprop": "content"
+        }
+        selType = rget(self.conf, ["pageSelector", "type"])
+        selVal = rget(self.conf, ["pageSelector", "value"])
+        # TODO: Support other types of selectors
+        if selType == "pageid":
+            self.baseParams["pageids"] = selVal
+        elif selType == "category":
+            self.baseParams.update({
+                "generator": "categorymembers",
+                "gcmtitle": "Category:%s" % selVal
+            })
+
+    def makeRequest(self, extraParams=None, saveUrl=False):
+        """Make a MediaWiki API request"""
+        params = copy.deepcopy(self.baseParams)
+        if extraParams:
+            params.update(extraParams)
+        response = requests.get(self.baseUrl, params=params)
+        if response.status_code == requests.codes.ok:
+            rj = response.json()
+            if saveUrl:
+                rj["metadata"] = {
+                    "source": response.url
+                }
+            return rj
+        else:
+            response.raise_for_status()
+
+    # TODO: Rip this out and put it in a custom domain module
     def stripSyntaxHighlighter(self, text):
         text = text.replace("<syntaxhighlight lang=\"javascript\">", "")
         text = text.replace("</syntaxhighlight>", "")
@@ -22,6 +71,7 @@ class WikiScraper:
         data["textHash"] = hashlib.sha256(data["text"].encode("utf-8")).hexdigest()
         del data["text"]
 
+    # TODO: Rip this out and put it in a custom domain module
     def combineNamesAndDescriptions(self, d, varType):
         nameField = varType + "VariableNames"
         descField = varType + "VariableDescriptions"
@@ -50,6 +100,7 @@ class WikiScraper:
         elif descField in d:
             print "Only descriptions found!"
 
+    # TODO: Rip this out and put it in a custom domain module
     def cleanExampleRequest(self, data):
         if "httpMethod" in data and "exampleRequest" in data and data["httpMethod"] == "post":
             try:
@@ -58,6 +109,7 @@ class WikiScraper:
             except ValueError as ve:
                 print "Error decoding JSON for exampleRequest in " + data["name"]
 
+    # TODO: Rip this out and put it in a custom domain module
     # GetPublicXurVendor has blocks for "When Xur is/isn't available."
     def cleanExampleResponse(self, data):
         if data["name"] == "GetPublicXurVendor":
@@ -99,7 +151,7 @@ class WikiScraper:
         template = wikicode.filter_templates()[0]
         # Perform extractions
         data = {}
-        for ext in conf["extractions"]:
+        for ext in self.conf["extractions"]:
             sel = ext["selector"]
             if sel["type"] == "pageData":
                 data[rget(ext, ["target", "name"])] = pageData[sel["value"]]
@@ -129,75 +181,60 @@ class WikiScraper:
 
         return data
 
-    def saveResponse(self, response, baseUrl, calledUrl, responseIndex=0):
-        response["metadata"] = {
-            "source": calledUrl
-        }
+    def saveResponses(self, response=None, responseIndex=0):
+        if not response:
+            response = self.makeRequest(saveUrl=True)
         nextResponse = None
         if "query-continue" in response:
             continueParam = response["query-continue"].values()[0]
-            continueQueryString = "%s=%s" % (continueParam.keys()[0], continueParam.values()[0])
-            nextUrl = baseUrl + "&%s" % continueQueryString
+            nextResponse = self.makeRequest(extraParams={
+                continueParam.keys()[0]: continueParam.values()[0]
+            }, saveUrl=True)
             del response["query-continue"]
-            response["metadata"]["next"] = nextUrl
-            nextResponse = json.loads(urllib2.urlopen(nextUrl).read())
-        outputFilename = sys.argv[1].replace(".yml", "-raw-%03d.json" % responseIndex)
+            response["metadata"]["next"] = nextResponse["metadata"]["source"]
+        outputFilename = self.configFileName.replace(".yml", "-raw-%03d.json" % responseIndex)
         json.dump(response, file(outputFilename, "w"))
         if nextResponse:
-            self.saveResponse(nextResponse, baseUrl, nextUrl, responseIndex+1)
+            self.saveResponses(nextResponse, responseIndex+1)
 
+    def processResults(self, response=None, extracted=[]):
+        if not response:
+            response = self.makeRequest()
 
-    # TODO: Fucking awful
-    def handleResponse(self, response, baseUrl, extractedData=[]):
-        for pageId, pageData in rget(response, ["query", "pages"]).iteritems():
-            extractedData.append(self.performExtractions(pageData))
+        for pageId, pageData in rget(response, ["query", "pages"]).items():
+            extracted.append(self.performExtractions(pageData))
 
         if "query-continue" in response:
             continueParam = response["query-continue"].values()[0]
-            url = baseUrl + "&%s=%s" % (continueParam.keys()[0], continueParam.values()[0])
-            nextResponse = json.loads(urllib2.urlopen(url).read())
-            extractedData = self.handleResponse(nextResponse, baseUrl, extractedData)
+            nextResponse = self.makeRequest(extraParams={
+                continueParam.keys()[0]: continueParam.values()[0]
+            })
+            extracted = self.processResults(nextResponse, extracted)
 
-        return extractedData
+        return extracted
 
 def rget(dataDict, mapList):
     """Recursively retrieves a nested entity from a dictionary.
        See: http://stackoverflow.com/a/14692747"""
     return reduce(lambda d, k: d[k], mapList, dataDict)
 
-# TODO: Check out argparse
-# Make sure a config file's name was passed in, then load it
-if len(sys.argv) > 1:
-    # TODO: Verify file exists
-    conf = yaml.load(file(sys.argv[1], "r"))
-else:
-    # TODO: Print usage
-    print "No file specified!"
-    exit()
+parser = argparse.ArgumentParser()
+parser.add_argument("config_file",
+                    help="path to the config file that defines the scraping operations")
+parser.add_argument("--save-only", action="store_true",
+                    help="if this is specified, the raw JSON will only be saved to files, not processed")
 
-# Get data
-# TODO: Support looping and paging
-url = "{0}/api.php?action=query&format=json&prop=revisions&rvprop=content".format(conf["baseUrl"])
-# TODO: Support other types of selectors
-selType = rget(conf, ["pageSelector", "type"])
-selVal = rget(conf, ["pageSelector", "value"])
-if selType == "pageid":
-    url = url + "&pageids={0}".format(selVal)
-elif selType == "category":
-    url = url + "&generator=categorymembers&gcmtitle=Category:{0}".format(selVal)
-# TODO: Make this waaayyyyy safer
-# TODO: http://docs.python-requests.org/en/latest/
-response = json.loads(urllib2.urlopen(url).read())
+args = parser.parse_args()
 
-scraper = WikiScraper()
+scraper = WikiScraper(args.config_file)
 
-if len(sys.argv) == 3 and sys.argv[2] == "--save-only":
+if args.save_only:
     # Just save the raw data for future processing
-    scraper.saveResponse(response, url, url)
+    scraper.saveResponses()
 else:
     # Extract data
-    extractedData = scraper.handleResponse(response, url)
+    extractedData = scraper.processResults()
 
     # TODO: This is also terrible
-    yaml.safe_dump(extractedData, file(conf["outputFilename"], "w"))
-    yaml.dump(extractedData, file(conf["outputFilename"].replace(".yml", "-loadable.yml"), "w"))
+    yaml.safe_dump(extractedData, file(scraper.conf["outputFilename"], "w"))
+    yaml.dump(extractedData, file(scraper.conf["outputFilename"].replace(".yml", "-loadable.yml"), "w"))
