@@ -14,7 +14,7 @@ import yaml
 class WikiScraper:
     """Used to scrape structured data from a set of MediaWiki pages"""
 
-    def __init__(self, configFileName):
+    def __init__(self, configFileName, fromFiles):
         """Set up the scraper"""
         if not configFileName:
             raise ValueError("Must pass in the name of a config file")
@@ -24,6 +24,8 @@ class WikiScraper:
                 self.conf = yaml.load(configFile)
         else:
             raise IOError("Config file %s does not exist" % configFileName)
+
+        self.fromFiles = fromFiles
 
         # Set up base URL and params for easy access
         self.baseUrl = self.conf["baseUrl"]
@@ -59,6 +61,17 @@ class WikiScraper:
             return rj
         else:
             response.raise_for_status()
+
+    def getResponseFileName(self, index):
+        return self.configFileName.replace(".yml", "-raw-%03d.json" % index)
+
+    def loadResponseFile(self, index):
+        responseFileName = self.getResponseFileName(index)
+        if os.path.isfile(responseFileName):
+            with open(responseFileName, "r") as responseFile:
+                return json.load(responseFile)
+        else:
+            raise IOError("Response file %s does not exist" % responseFileName)
 
     # TODO: Rip this out and put it in a custom domain module
     def stripSyntaxHighlighter(self, text):
@@ -192,24 +205,32 @@ class WikiScraper:
             }, saveUrl=True)
             del response["query-continue"]
             response["metadata"]["next"] = nextResponse["metadata"]["source"]
-        outputFilename = self.configFileName.replace(".yml", "-raw-%03d.json" % responseIndex)
+        outputFilename = self.getResponseFileName(responseIndex)
         json.dump(response, file(outputFilename, "w"))
         if nextResponse:
             self.saveResponses(nextResponse, responseIndex+1)
 
-    def processResults(self, response=None, extracted=[]):
+    def processResults(self, response=None, extracted=[], responseIndex=0):
         if not response:
-            response = self.makeRequest()
+            if self.fromFiles:
+                response = self.loadResponseFile(0)
+            else:
+                response = self.makeRequest()
 
         for pageId, pageData in rget(response, ["query", "pages"]).items():
             extracted.append(self.performExtractions(pageData))
 
-        if "query-continue" in response:
-            continueParam = response["query-continue"].values()[0]
-            nextResponse = self.makeRequest(extraParams={
-                continueParam.keys()[0]: continueParam.values()[0]
-            })
-            extracted = self.processResults(nextResponse, extracted)
+        if self.fromFiles:
+            if "next" in response["metadata"]:
+                nextResponse = self.loadResponseFile(responseIndex+1)
+                extracted = self.processResults(nextResponse, extracted, responseIndex+1)
+        else:
+            if "query-continue" in response:
+                continueParam = response["query-continue"].values()[0]
+                nextResponse = self.makeRequest(extraParams={
+                    continueParam.keys()[0]: continueParam.values()[0]
+                })
+                extracted = self.processResults(nextResponse, extracted)
 
         return extracted
 
@@ -221,12 +242,15 @@ def rget(dataDict, mapList):
 parser = argparse.ArgumentParser()
 parser.add_argument("config_file",
                     help="path to the config file that defines the scraping operations")
-parser.add_argument("--save-only", action="store_true",
-                    help="if this is specified, the raw JSON will only be saved to files, not processed")
+group = parser.add_mutually_exclusive_group()
+group.add_argument("--save-only", action="store_true",
+                   help="if this is specified, the raw JSON will only be saved to files, not processed")
+group.add_argument("--from-files", action="store_true",
+                   help="if this is specified, response data will be loaded from files previously saved using the --save-only flag")
 
 args = parser.parse_args()
 
-scraper = WikiScraper(args.config_file)
+scraper = WikiScraper(args.config_file, args.from_files)
 
 if args.save_only:
     # Just save the raw data for future processing
