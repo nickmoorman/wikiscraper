@@ -135,42 +135,46 @@ class WikiScraper:
 
         return data
 
-    def saveResponses(self, response=None, responseIndex=0):
-        if not response:
-            response = self.makeRequest(saveUrl=True)
+    def generateContinueParam(self, response):
+        continueParam = response["query-continue"].values()[0]
+        continueDict = {
+            continueParam.keys()[0]: continueParam.values()[0]
+        }
+
+        return continueDict
+
+    def saveResponses(self, response, responseIndex=0):
+        # If there's a continuation, grab it so we can save the "next" url
+        # with the current response
         nextResponse = None
         if "query-continue" in response:
-            continueParam = response["query-continue"].values()[0]
-            nextResponse = self.makeRequest(extraParams={
-                continueParam.keys()[0]: continueParam.values()[0]
-            }, saveUrl=True)
+            continueParam = self.generateContinueParam(response)
+            nextResponse = self.makeRequest(extraParams=continueParam, saveUrl=True)
             del response["query-continue"]
             response["metadata"]["next"] = nextResponse["metadata"]["source"]
+
+        # Save the response
         outputFilename = self.getResponseFileName(responseIndex)
-        json.dump(response, file(outputFilename, "w"))
+        with open(outputFilename, "w") as responseFile:
+            json.dump(response, responseFile)
+
+        # Recurse while we have additional responses to save
         if nextResponse:
             self.saveResponses(nextResponse, responseIndex+1)
 
-    def processResults(self, response=None, extracted=[], responseIndex=0):
-        if not response:
-            if self.fromFiles:
-                response = self.loadResponseFile(0)
-            else:
-                response = self.makeRequest()
-
+    def processResults(self, response, extracted=[], responseIndex=0):
         for pageId, pageData in rget(response, ["query", "pages"]).items():
             extracted.append(self.performExtractions(pageData))
 
+        # Continue processing "next" responses while we have them
         if self.fromFiles:
             if "next" in response["metadata"]:
                 nextResponse = self.loadResponseFile(responseIndex+1)
                 extracted = self.processResults(nextResponse, extracted, responseIndex+1)
         else:
             if "query-continue" in response:
-                continueParam = response["query-continue"].values()[0]
-                nextResponse = self.makeRequest(extraParams={
-                    continueParam.keys()[0]: continueParam.values()[0]
-                })
+                continueParam = self.generateContinueParam(response)
+                nextResponse = self.makeRequest(extraParams=continueParam)
                 extracted = self.processResults(nextResponse, extracted)
 
         return extracted
@@ -198,10 +202,15 @@ scraper = WikiScraper(args.config_file, args.from_files)
 
 if args.save_only:
     # Just save the raw data for future processing
-    scraper.saveResponses()
+    response = scraper.makeRequest(saveUrl=True)
+    scraper.saveResponses(response)
 else:
     # Extract data
-    extractedData = scraper.processResults()
+    if scraper.fromFiles:
+        response = scraper.loadResponseFile(0)
+    else:
+        response = scraper.makeRequest()
+    extractedData = scraper.processResults(response)
 
     # TODO: This is also terrible
     yaml.safe_dump(extractedData, file(scraper.conf["outputFilename"], "w"))
