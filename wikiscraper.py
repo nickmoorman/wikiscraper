@@ -7,7 +7,6 @@ import json
 import mwparserfromhell
 import os.path
 import pprint
-import re
 import requests
 import yaml
 
@@ -73,93 +72,36 @@ class WikiScraper:
         else:
             raise IOError("Response file %s does not exist" % responseFileName)
 
-    # TODO: Rip this out and put it in a custom domain module
-    def stripSyntaxHighlighter(self, text):
-        text = text.replace("<syntaxhighlight lang=\"javascript\">", "")
-        text = text.replace("</syntaxhighlight>", "")
+    def executeFunction(self, fnName, var, addtlArgs=None):
+        parts = fnName.split(".")
+        fn = None
+        if len(parts) == 2:
+            mod = __import__(parts[0])
+            fn = getattr(mod, parts[1])
+        elif len(parts) == 1:
+            fn = getattr(self, fnName)
+        else:
+            raise Exception("Invalid custom processor '%s'" % fnName)
 
-        return text
+        if addtlArgs:
+            return fn(var, *addtlArgs)
+        else:
+            return fn(var)
 
     def hashPageText(self, data):
         data["textHash"] = hashlib.sha256(data["text"].encode("utf-8")).hexdigest()
         del data["text"]
 
-    # TODO: Rip this out and put it in a custom domain module
-    def combineNamesAndDescriptions(self, d, varType):
-        nameField = varType + "VariableNames"
-        descField = varType + "VariableDescriptions"
-        finalField = varType + "Variables"
-        if nameField in d and descField in d:
-            if len(d[nameField]) == 0 or len(d[descField]) == 0:
-                print "Empty array found!"
-            elif len(d[nameField]) != len(d[descField]):
-                print "Unmatched pairs!"
-            else:
-                pairs = {}
-                pattern = re.compile("\[\[([A-Za-z]*)\|([A-Za-z]*)\]\]")
-                for i in xrange(0, len(d[nameField])):
-                    key = d[nameField][i]
-                    val = d[descField][i]
-                    m = pattern.match(key)
-                    if m:
-                        pairs[m.group(2)] = val + " (See %s Wikia page for more details.)" % m.group(1)
-                    else:
-                        pairs[key] = val
-                d[finalField] = pairs
-                del d[nameField]
-                del d[descField]
-        elif nameField in d:
-            print "Only names found!"
-        elif descField in d:
-            print "Only descriptions found!"
+        return data
 
-    # TODO: Rip this out and put it in a custom domain module
-    def cleanExampleRequest(self, data):
-        if "httpMethod" in data and "exampleRequest" in data and data["httpMethod"] == "post":
-            try:
-                req = json.loads(data["exampleRequest"].split("\n", 1)[1])
-                data["exampleRequest"] = json.dumps(req)
-            except ValueError as ve:
-                print "Error decoding JSON for exampleRequest in " + data["name"]
-
-    # TODO: Rip this out and put it in a custom domain module
-    # GetPublicXurVendor has blocks for "When Xur is/isn't available."
-    def cleanExampleResponse(self, data):
-        if data["name"] == "GetPublicXurVendor":
-            res = data["exampleResponse"].replace("When Xur isn't available.", "")
-            responses = res.split("When Xur is available.")
-            try:
-                data["exampleResponses"] = [
-                    json.dumps(json.loads(responses[1])),
-                    json.dumps(json.loads(responses[0]))
-                ]
-                del data["exampleResponse"]
-            except ValueError as ve:
-                print "Error decoding JSON for exampleResponses in GetPublicXurVendor"
-                print responses
-        elif "exampleResponse" in data:
-            res = data["exampleResponse"]
-            phrases = [
-                "Please note: This response has been truncated for easier viewing.",
-                "This response has been truncated to make it easier to see the full structure.",
-                "// Note this is an associative array",
-                "Note: Response has been truncated."
-            ]
-            for phrase in phrases:
-                res = res.replace(phrase, "")
-            try:
-                res = json.loads(res)
-                data["exampleResponses"] = [json.dumps(res)]
-                del data["exampleResponse"]
-            except ValueError as ve:
-                print "Error decoding JSON for exampleResponse in " + data["name"]
-                print res
-
-    # TODO: This is VERY specific
+    # TODO: Clean this mess up a bit...
     def performExtractions(self, pageData):
         text = rget(pageData, ["revisions", 0, "*"])
-        # TODO: Make this configurable
-        text = self.stripSyntaxHighlighter(text)
+        textPreExtractionOps = rget(self.conf, ["preExtraction", "text"])
+        if textPreExtractionOps:
+            for op in textPreExtractionOps:
+                args = op["args"] if "args" in op else None
+                text = self.executeFunction(op["function"], text, args)
         wikicode = mwparserfromhell.parse(text)
         template = wikicode.filter_templates()[0]
         # Perform extractions
@@ -184,13 +126,12 @@ class WikiScraper:
                             data[targetName] = []
                         data[targetName].append(template.get(varName).value.strip())
 
-        # TODO: Make this configurable too
-        self.hashPageText(data)
-        self.combineNamesAndDescriptions(data, "path")
-        self.combineNamesAndDescriptions(data, "queryString")
-        self.combineNamesAndDescriptions(data, "jsonBody")
-        self.cleanExampleRequest(data)
-        self.cleanExampleResponse(data)
+        # Handle any post-extraction operations defined in the configuration
+        if "postExtraction" in self.conf:
+            postExtractionOps = self.conf["postExtraction"]
+            for op in postExtractionOps:
+                args = op["args"] if "args" in op else None
+                data = self.executeFunction(op["function"], data, args)
 
         return data
 
@@ -237,7 +178,10 @@ class WikiScraper:
 def rget(dataDict, mapList):
     """Recursively retrieves a nested entity from a dictionary.
        See: http://stackoverflow.com/a/14692747"""
-    return reduce(lambda d, k: d[k], mapList, dataDict)
+    try:
+        return reduce(lambda d, k: d[k], mapList, dataDict)
+    except KeyError as ke:
+        return None
 
 parser = argparse.ArgumentParser()
 parser.add_argument("config_file",
